@@ -13,7 +13,7 @@ webpush.setVapidDetails(
   process.env.VAPID_PRIVATE_KEY
 );
 
-// schedules: endpoint -> { subscription, timers: { water, med, fert } }
+// ── 推播排程儲存 ──────────────────────────────────────────────────────
 const schedules = new Map();
 
 function subKey(sub){ return sub.endpoint; }
@@ -38,6 +38,7 @@ function clearTypeTimer(key, type){
   if(entry?.timers?.[type]){ clearTimeout(entry.timers[type]); entry.timers[type]=null; }
 }
 
+// ── 推播 API ──────────────────────────────────────────────────────────
 app.post('/subscribe',(req,res)=>{
   const{subscription}=req.body;
   if(!subscription?.endpoint) return res.status(400).json({error:'缺少 subscription'});
@@ -81,11 +82,72 @@ app.post('/unschedule',(req,res)=>{
   else{
     const entry=schedules.get(key);
     if(entry) Object.keys(entry.timers).forEach(t=>clearTypeTimer(key,t));
-    schedules.delete(key); console.log('🗑️ 全部取消');
+    schedules.delete(key);
   }
   res.json({ok:true});
 });
 
+// ── Google OAuth Token 交換 API ───────────────────────────────────────
+// 前端把 authorization code 送來，後端換成 access_token + refresh_token
+app.post('/google/token',(req,res)=>{
+  const{code,redirect_uri}=req.body;
+  if(!code||!redirect_uri) return res.status(400).json({error:'缺少 code 或 redirect_uri'});
+  const clientId=process.env.GOOGLE_CLIENT_ID;
+  const clientSecret=process.env.GOOGLE_CLIENT_SECRET;
+  if(!clientId||!clientSecret) return res.status(500).json({error:'伺服器未設定 Google 憑證'});
+
+  fetch('https://oauth2.googleapis.com/token',{
+    method:'POST',
+    headers:{'Content-Type':'application/x-www-form-urlencoded'},
+    body:new URLSearchParams({
+      code, redirect_uri,
+      client_id: clientId,
+      client_secret: clientSecret,
+      grant_type: 'authorization_code'
+    })
+  })
+  .then(r=>r.json())
+  .then(data=>{
+    if(data.error) return res.status(400).json({error:data.error_description||data.error});
+    res.json({
+      access_token:  data.access_token,
+      refresh_token: data.refresh_token,
+      expires_in:    data.expires_in||3600
+    });
+  })
+  .catch(e=>{ console.error('Token exchange error:',e); res.status(500).json({error:'token 交換失敗'}); });
+});
+
+// 前端送來 refresh_token，後端換新的 access_token
+app.post('/google/refresh',(req,res)=>{
+  const{refresh_token}=req.body;
+  if(!refresh_token) return res.status(400).json({error:'缺少 refresh_token'});
+  const clientId=process.env.GOOGLE_CLIENT_ID;
+  const clientSecret=process.env.GOOGLE_CLIENT_SECRET;
+  if(!clientId||!clientSecret) return res.status(500).json({error:'伺服器未設定 Google 憑證'});
+
+  fetch('https://oauth2.googleapis.com/token',{
+    method:'POST',
+    headers:{'Content-Type':'application/x-www-form-urlencoded'},
+    body:new URLSearchParams({
+      refresh_token,
+      client_id: clientId,
+      client_secret: clientSecret,
+      grant_type: 'refresh_token'
+    })
+  })
+  .then(r=>r.json())
+  .then(data=>{
+    if(data.error) return res.status(400).json({error:data.error_description||data.error});
+    res.json({
+      access_token: data.access_token,
+      expires_in:   data.expires_in||3600
+    });
+  })
+  .catch(e=>{ console.error('Refresh error:',e); res.status(500).json({error:'refresh 失敗'}); });
+});
+
+// ── 健康檢查 ──────────────────────────────────────────────────────────
 app.get('/health',(req,res)=>{
   res.json({status:'ok',schedules:schedules.size,uptime:Math.round(process.uptime())+'s'});
 });
@@ -94,5 +156,6 @@ const PORT=process.env.PORT||3000;
 app.listen(PORT,()=>{
   console.log(`\n🌿 植物照護推播伺服器啟動！`);
   console.log(`   Port: ${PORT}`);
-  console.log(`   VAPID: ${process.env.VAPID_PUBLIC_KEY?'✅':'❌'}\n`);
+  console.log(`   VAPID: ${process.env.VAPID_PUBLIC_KEY?'✅':'❌'}`);
+  console.log(`   Google OAuth: ${process.env.GOOGLE_CLIENT_ID?'✅':'❌'}\n`);
 });
